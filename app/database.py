@@ -266,6 +266,115 @@ CREATE TABLE IF NOT EXISTS pilot_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pilot_interventions ON pilot_interventions(session_id,id);
+
+CREATE TABLE IF NOT EXISTS cohort_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version >= 1),
+    name TEXT NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    criteria_json TEXT NOT NULL,
+    criteria_digest TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'frozen' CHECK(status IN ('proposed','frozen')),
+    parent_id INTEGER REFERENCES cohort_versions(id),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    issued_by TEXT,
+    issued_at TEXT,
+    issue_note TEXT NOT NULL DEFAULT '',
+    included_count INTEGER NOT NULL DEFAULT 0,
+    excluded_count INTEGER NOT NULL DEFAULT 0,
+    roster_digest TEXT NOT NULL DEFAULT '',
+    UNIQUE(code, version)
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_versions_code ON cohort_versions(code,version);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cohort_single_proposed
+    ON cohort_versions(code) WHERE status='proposed';
+CREATE TABLE IF NOT EXISTS cohort_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cohort_version_id INTEGER NOT NULL REFERENCES cohort_versions(id) ON DELETE RESTRICT,
+    session_id INTEGER NOT NULL REFERENCES pilot_sessions(id),
+    member_ref TEXT NOT NULL,
+    included INTEGER NOT NULL CHECK(included IN (0,1)),
+    inclusion_reasons_json TEXT NOT NULL DEFAULT '[]',
+    exclusion_reasons_json TEXT NOT NULL DEFAULT '[]',
+    observation_version INTEGER,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    evidence_snapshot_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    UNIQUE(cohort_version_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_members_version ON cohort_members(cohort_version_id,included,session_id);
+CREATE TABLE IF NOT EXISTS cohort_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cohort_version_id INTEGER NOT NULL REFERENCES cohort_versions(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_events_version ON cohort_events(cohort_version_id,id);
+CREATE TABLE IF NOT EXISTS cohort_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cohort_version_id INTEGER NOT NULL REFERENCES cohort_versions(id) ON DELETE RESTRICT,
+    idempotency_key TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    artifact_type TEXT NOT NULL DEFAULT 'export',
+    format TEXT NOT NULL DEFAULT 'json',
+    content_json TEXT NOT NULL,
+    content_digest TEXT NOT NULL,
+    member_count INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(cohort_version_id, idempotency_key)
+);
+CREATE TRIGGER IF NOT EXISTS trg_cohort_versions_frozen_no_update
+BEFORE UPDATE ON cohort_versions
+WHEN OLD.status='frozen'
+BEGIN
+    SELECT RAISE(ABORT, '已签发的队列版本不可修改');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_versions_frozen_no_delete
+BEFORE DELETE ON cohort_versions
+WHEN OLD.status='frozen'
+BEGIN
+    SELECT RAISE(ABORT, '已签发的队列版本不可删除');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_members_no_update
+BEFORE UPDATE ON cohort_members
+WHEN EXISTS (SELECT 1 FROM cohort_versions WHERE id=OLD.cohort_version_id AND status='frozen')
+BEGIN
+    SELECT RAISE(ABORT, '已签发队列的成员清单不可修改');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_members_no_delete
+BEFORE DELETE ON cohort_members
+WHEN EXISTS (SELECT 1 FROM cohort_versions WHERE id=OLD.cohort_version_id AND status='frozen')
+BEGIN
+    SELECT RAISE(ABORT, '已签发队列的成员清单不可删除');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_events_frozen_no_update
+BEFORE UPDATE ON cohort_events
+WHEN EXISTS (SELECT 1 FROM cohort_versions WHERE id=OLD.cohort_version_id AND status='frozen')
+BEGIN
+    SELECT RAISE(ABORT, '已签发队列的事件记录不可修改');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_events_frozen_no_delete
+BEFORE DELETE ON cohort_events
+WHEN EXISTS (SELECT 1 FROM cohort_versions WHERE id=OLD.cohort_version_id AND status='frozen')
+BEGIN
+    SELECT RAISE(ABORT, '已签发队列的事件记录不可删除');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_artifacts_no_update
+BEFORE UPDATE ON cohort_artifacts
+BEGIN
+    SELECT RAISE(ABORT, '队列导出制品一经生成不可修改');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_artifacts_no_delete
+BEFORE DELETE ON cohort_artifacts
+BEGIN
+    SELECT RAISE(ABORT, '队列导出制品一经生成不可删除');
+END;
 '''
 
 
@@ -282,6 +391,8 @@ PERMISSIONS = [
     ("feedback.read", "查看体验反馈", "feedback", "read"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("cohorts.read", "查看队列冻结", "cohorts", "read"),
+    ("cohorts.manage", "冻结与签发队列", "cohorts", "manage"),
 ]
 
 
@@ -334,7 +445,7 @@ def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
-        connection.execute("PRAGMA user_version=2")
+        connection.execute("PRAGMA user_version=3")
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

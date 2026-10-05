@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.api import audit, auth, departments_admin, maintenance, roles, system, users
 from app.catalog.router import router as catalog_router
+from app.cohorts.router import router as cohort_router
 from app.core.errors import DomainError
 from app.database import close_connection, init_db
 from app.pilots.router import router as pilot_router
@@ -41,6 +42,7 @@ app.include_router(departments_admin.router)
 app.include_router(maintenance.router)
 app.include_router(catalog_router)
 app.include_router(pilot_router)
+app.include_router(cohort_router)
 
 
 @app.get("/")
