@@ -21,12 +21,19 @@ class PilotRepository:
         rows = self.connection.execute("SELECT * FROM pilot_protocols WHERE active=1 ORDER BY code,version").fetchall()
         return [dict(row) for row in rows]
 
-    def create_protocol(self, *, code: str, name: str, capability: str, parameter_schema: dict[str, Any], defaults: dict[str, Any], max_runtime_seconds: int, max_attempts: int, created_by: str, now: str) -> dict[str, Any]:
+    def create_protocol(self, *, code: str, name: str, capability: str, product_id: int | None, parameter_schema: dict[str, Any], defaults: dict[str, Any], max_runtime_seconds: int, max_attempts: int, created_by: str, now: str) -> dict[str, Any]:
         cursor = self.connection.execute(
-            "INSERT INTO pilot_protocols(code,name,capability,version,parameter_schema_json,default_parameters_json,max_runtime_seconds,max_attempts,active,created_by,created_at,updated_at) VALUES(?,?,?,1,?,?,?,?,1,?,?,?)",
-            (code, name, capability, json.dumps(parameter_schema, ensure_ascii=False, sort_keys=True), json.dumps(defaults, ensure_ascii=False, sort_keys=True), max_runtime_seconds, max_attempts, created_by, now, now),
+            "INSERT INTO pilot_protocols(code,name,capability,product_id,version,parameter_schema_json,default_parameters_json,max_runtime_seconds,max_attempts,active,created_by,created_at,updated_at) VALUES(?,?,?,?,1,?,?,?,?,1,?,?,?)",
+            (code, name, capability, product_id, json.dumps(parameter_schema, ensure_ascii=False, sort_keys=True), json.dumps(defaults, ensure_ascii=False, sort_keys=True), max_runtime_seconds, max_attempts, created_by, now, now),
         )
         return dict(self.protocol_by_id(cursor.lastrowid))
+
+    def link_product(self, protocol_id: int, product_id: int, now: str) -> dict[str, Any]:
+        self.connection.execute(
+            "UPDATE pilot_protocols SET product_id=?,updated_at=? WHERE id=?",
+            (product_id, now, protocol_id),
+        )
+        return dict(self.protocol_by_id(protocol_id))
 
     def quota(self, subject_type: str, subject_key: str) -> sqlite3.Row | None:
         return self.connection.execute("SELECT * FROM pilot_quotas WHERE subject_type=? AND subject_key=?", (subject_type, subject_key)).fetchone()

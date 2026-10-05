@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Query
 
-from app.pilots.schemas import BatchOperation, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, SessionClaim, SessionFailure, SessionObservation, SessionSubmit, ProtocolCreate
+from app.pilots.schemas import BatchOperation, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, SessionClaim, SessionFailure, SessionObservation, SessionSubmit, ProtocolCreate, ProtocolLinkProduct
 from app.pilots.service import PilotOperationsService
 
 router = APIRouter(prefix="/api/pilots", tags=["健康创新试点体验场次运营"])
@@ -20,6 +20,11 @@ def list_protocols():
 @router.post("/protocols", status_code=201)
 def create_protocol(payload: ProtocolCreate, actor: str = Query(..., min_length=1)):
     return service().create_protocol(payload.model_dump(), actor)
+
+
+@router.post("/protocols/{code}/product-link")
+def link_protocol_product(code: str, payload: ProtocolLinkProduct):
+    return service().link_protocol_product(code, payload.product_code, payload.actor)
 
 
 @router.put("/quotas")

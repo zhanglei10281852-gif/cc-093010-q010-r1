@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from app.pilots.repository import PilotRepository
+from app.catalog.repository import CatalogRepository
 from app.core.clock import Clock, SystemClock, to_storage
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.database import get_connection, transaction
@@ -35,12 +36,35 @@ class PilotOperationsService:
             repository = PilotRepository(connection)
             if repository.protocol_by_code(payload["code"]):
                 raise ConflictError("参数方案编码已存在")
+            product_id = self._resolve_product_id(connection, payload.get("product_code"))
             return repository.create_protocol(
                 code=payload["code"], name=payload["name"], capability=payload["capability"],
+                product_id=product_id,
                 parameter_schema=payload["parameter_schema"], defaults=payload["default_parameters"],
                 max_runtime_seconds=payload["max_runtime_seconds"], max_attempts=payload["max_attempts"],
                 created_by=actor, now=now,
             )
+
+    def link_protocol_product(self, protocol_code: str, product_code: str, actor: str) -> dict[str, Any]:
+        now = to_storage(self.clock.now())
+        with transaction(immediate=True) as connection:
+            repository = PilotRepository(connection)
+            protocol = repository.protocol_by_code(protocol_code.strip().lower())
+            if protocol is None:
+                raise NotFoundError("参数方案不存在")
+            product_id = self._resolve_product_id(connection, product_code)
+            if protocol["product_id"] is not None and int(protocol["product_id"]) == product_id:
+                return dict(repository.protocol_by_id(protocol["id"]))
+            return repository.link_product(int(protocol["id"]), product_id, now)
+
+    @staticmethod
+    def _resolve_product_id(connection: sqlite3.Connection, product_code: str | None) -> int | None:
+        if not product_code:
+            return None
+        product = CatalogRepository(connection).product_by_code(product_code.strip().lower())
+        if product is None:
+            raise NotFoundError("关联的健康创新产品不存在")
+        return int(product["id"])
 
     def set_quota(self, payload: dict[str, Any], actor: str) -> dict[str, Any]:
         now = to_storage(self.clock.now())

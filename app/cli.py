@@ -100,6 +100,83 @@ def pilot_demo() -> int:
     return 0
 
 
+def cohort_demo() -> int:
+    with tempfile.TemporaryDirectory(prefix="health-cohort-") as directory:
+        os.environ["HEALTH_INNOVATION_DATABASE_PATH"] = os.path.join(directory, "cohort.db")
+        close_connection()
+        with TestClient(app) as client:
+            product = client.post("/api/catalog/products", json={
+                "code": "bci-a",
+                "name": "脑机接口康复仪",
+                "organization": "示例神经科技",
+                "origin_country": "中国",
+                "category": "康复设备",
+                "intended_use": "用于医院与展会体验点的脑机接口康复观察",
+                "risk_level": "high",
+                "regulatory_status": "研究",
+            })
+            site = client.post("/api/catalog/sites", json={
+                "code": "hospital-a", "name": "示范医院", "site_type": "医院", "region": "杭州",
+                "capabilities": ["bci"], "max_concurrent": 2,
+            })
+            evidence = client.post("/api/catalog/evidence", json={
+                "product_code": "bci-a", "evidence_type": "临床", "title": "小样本临床观察",
+                "source_name": "示范医院", "source_region": "杭州", "version": "v1",
+                "content_digest": "sha256:" + "a" * 58, "summary": {"n": 12}, "submitted_by": "reviewer-demo",
+            })
+            protocol = client.post("/api/pilots/protocols?actor=demo", json={
+                "code": "bci-rehab", "name": "脑机接口康复方案", "capability": "bci",
+                "product_code": "bci-a",
+                "parameter_schema": {"minutes": {"type": "integer", "required": True, "minimum": 1, "maximum": 30}},
+                "default_parameters": {}, "max_runtime_seconds": 600, "max_attempts": 2,
+            })
+            submitted = client.post("/api/pilots/sessions", json={
+                "protocol_code": "bci-rehab", "project_code": "bci-2026", "requested_by": "operator-demo",
+                "parameters": {"minutes": 10}, "priority": 70, "idempotency_key": "cohort-demo-session-1",
+            })
+            client.post("/api/pilots/sessions/claim", json={"site_code": "hospital-a", "capabilities": ["bci"], "lease_seconds": 60})
+            completed = client.post(
+                f"/api/pilots/sessions/{submitted.json()['id']}/complete",
+                json={"site_code": "hospital-a", "observation": {"score": 0.8}, "metrics": {}},
+            )
+            # 第一天冻结：场次已完成，但证据仍处于待审阅状态，清单记录排除理由
+            first = client.post("/api/cohorts", json={
+                "code": "bci-2026-q3", "name": "脑机接口观察队列",
+                "cutoff_at": "2026-11-01T00:00:00Z",
+                "criteria": {
+                    "product_categories": ["康复设备"],
+                    "protocol_codes": ["bci-rehab"],
+                    "site_types": ["医院"],
+                    "quality": {"evidence_required": ["临床"], "min_evidence_accepted": 1},
+                },
+                "created_by": "stats-demo",
+            })
+            # 证据接受后提出候选修订：新数据只能作为候选增加
+            client.post(f"/api/catalog/evidence/{evidence.json()['id']}/review",
+                        json={"reviewer": "doctor-demo", "decision": "accepted", "note": "临床数据可接受"})
+            revision = client.post("/api/cohorts/bci-2026-q3/revisions", json={
+                "cutoff_at": "2026-12-15T00:00:00Z", "actor": "stats-demo", "reason": "证据审阅完成",
+            })
+            issued = client.post("/api/cohorts/bci-2026-q3/versions/2/issue",
+                                 json={"actor": "review-lead", "reason": "阶段评审通过"})
+            export = client.post("/api/cohorts/bci-2026-q3/versions/2/export",
+                                 json={"idempotency_key": "cohort-demo-export-1"})
+            values = [product, site, evidence, protocol, submitted, completed, first, revision, issued, export]
+            if any(response.status_code >= 400 for response in values):
+                _print({"errors": [response.text for response in values if response.status_code >= 400]})
+                return 1
+            _print({
+                "cohort": "bci-2026-q3",
+                "v1_excluded": first.json()["excluded_total"],
+                "v2_added": len(revision.json()["diff"]["added"]),
+                "v2_manifest": issued.json()["manifest_digest"],
+                "export_digest": export.json()["content_digest"],
+                "members": len(export.json()["members"]),
+            })
+        close_connection()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="全球健康创新试点运营服务命令行")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -107,12 +184,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("check-db", help="检查数据库完整性")
     sub.add_parser("smoke", help="进程内检查根路径和健康接口")
     sub.add_parser("pilot-demo", help="运行产品、场地、方案和场次演示")
+    sub.add_parser("cohort-demo", help="运行队列冻结、修订、签发与导出演示")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     command = build_parser().parse_args(argv).command
-    actions = {"init-db": init_database, "check-db": check_database, "smoke": smoke, "pilot-demo": pilot_demo}
+    actions = {"init-db": init_database, "check-db": check_database, "smoke": smoke, "pilot-demo": pilot_demo, "cohort-demo": cohort_demo}
     try:
         return actions[command]()
     finally:

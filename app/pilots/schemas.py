@@ -9,10 +9,16 @@ class ProtocolCreate(BaseModel):
     code: str = Field(min_length=2, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]+$")
     name: str = Field(min_length=2, max_length=120)
     capability: str = Field(min_length=2, max_length=120)
+    product_code: str | None = Field(default=None, min_length=2, max_length=64)
     parameter_schema: dict[str, dict[str, Any]]
     default_parameters: dict[str, Any] = Field(default_factory=dict)
     max_runtime_seconds: int = Field(default=600, ge=1, le=86400)
     max_attempts: int = Field(default=3, ge=1, le=20)
+
+
+class ProtocolLinkProduct(BaseModel):
+    product_code: str = Field(min_length=2, max_length=64)
+    actor: str = Field(min_length=1, max_length=120)
 
 
 class QuotaSet(BaseModel):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -195,6 +196,7 @@ CREATE TABLE IF NOT EXISTS pilot_protocols (
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     capability TEXT NOT NULL,
+    product_id INTEGER REFERENCES health_products(id),
     version INTEGER NOT NULL DEFAULT 1,
     parameter_schema_json TEXT NOT NULL,
     default_parameters_json TEXT NOT NULL DEFAULT '{}',
@@ -266,6 +268,201 @@ CREATE TABLE IF NOT EXISTS pilot_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pilot_interventions ON pilot_interventions(session_id,id);
+
+CREATE TABLE IF NOT EXISTS cohort_freezes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    criteria_json TEXT NOT NULL,
+    rule_digest TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cohort_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cohort_id INTEGER NOT NULL REFERENCES cohort_freezes(id) ON DELETE RESTRICT,
+    version_no INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'candidate' CHECK(status IN ('candidate','issued')),
+    cutoff_at TEXT NOT NULL,
+    manifest_digest TEXT NOT NULL DEFAULT '',
+    member_total INTEGER NOT NULL DEFAULT 0,
+    included_total INTEGER NOT NULL DEFAULT 0,
+    excluded_total INTEGER NOT NULL DEFAULT 0,
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    diff_json TEXT NOT NULL DEFAULT '{}',
+    created_by TEXT NOT NULL,
+    issued_by TEXT,
+    issued_at TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(cohort_id, version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_versions_cohort ON cohort_versions(cohort_id,version_no);
+CREATE TABLE IF NOT EXISTS cohort_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL REFERENCES cohort_versions(id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL,
+    session_id INTEGER NOT NULL,
+    included INTEGER NOT NULL CHECK(included IN (0,1)),
+    decision_reason TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    member_digest TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(version_id, session_id),
+    UNIQUE(version_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_members_session ON cohort_members(session_id);
+CREATE TABLE IF NOT EXISTS cohort_entity_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_table TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
+    changed_at TEXT NOT NULL,
+    state_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cohort_snap_lookup ON cohort_entity_snapshots(entity_table,entity_id,changed_at,id);
+
+DROP TRIGGER IF EXISTS trg_cohort_snap_products_ins;
+DROP TRIGGER IF EXISTS trg_cohort_snap_products_upd;
+DROP TRIGGER IF EXISTS trg_cohort_snap_sites_ins;
+DROP TRIGGER IF EXISTS trg_cohort_snap_sites_upd;
+DROP TRIGGER IF EXISTS trg_cohort_snap_evidence_ins;
+DROP TRIGGER IF EXISTS trg_cohort_snap_evidence_upd;
+DROP TRIGGER IF EXISTS trg_cohort_snap_protocols_ins;
+DROP TRIGGER IF EXISTS trg_cohort_snap_protocols_upd;
+DROP TRIGGER IF EXISTS trg_cohort_snap_sessions_ins;
+DROP TRIGGER IF EXISTS trg_cohort_snap_sessions_upd;
+DROP TRIGGER IF EXISTS trg_cohort_version_issued_no_update;
+DROP TRIGGER IF EXISTS trg_cohort_version_issued_no_delete;
+DROP TRIGGER IF EXISTS trg_cohort_members_issued_no_update;
+DROP TRIGGER IF EXISTS trg_cohort_members_issued_no_delete;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_products_ins AFTER INSERT ON health_products
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('health_products',NEW.id,NEW.created_at,json_object(
+        'id',NEW.id,'code',NEW.code,'name',NEW.name,'organization',NEW.organization,
+        'origin_country',NEW.origin_country,'category',NEW.category,'intended_use',NEW.intended_use,
+        'risk_level',NEW.risk_level,'regulatory_status',NEW.regulatory_status,'active',NEW.active,
+        'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_products_upd AFTER UPDATE ON health_products
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('health_products',NEW.id,NEW.updated_at,json_object(
+        'id',NEW.id,'code',NEW.code,'name',NEW.name,'organization',NEW.organization,
+        'origin_country',NEW.origin_country,'category',NEW.category,'intended_use',NEW.intended_use,
+        'risk_level',NEW.risk_level,'regulatory_status',NEW.regulatory_status,'active',NEW.active,
+        'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_sites_ins AFTER INSERT ON pilot_sites
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('pilot_sites',NEW.id,NEW.created_at,json_object(
+        'id',NEW.id,'code',NEW.code,'name',NEW.name,'site_type',NEW.site_type,'region',NEW.region,
+        'capabilities_json',NEW.capabilities_json,'max_concurrent',NEW.max_concurrent,'status',NEW.status,
+        'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_sites_upd AFTER UPDATE ON pilot_sites
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('pilot_sites',NEW.id,NEW.updated_at,json_object(
+        'id',NEW.id,'code',NEW.code,'name',NEW.name,'site_type',NEW.site_type,'region',NEW.region,
+        'capabilities_json',NEW.capabilities_json,'max_concurrent',NEW.max_concurrent,'status',NEW.status,
+        'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_evidence_ins AFTER INSERT ON evidence_documents
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('evidence_documents',NEW.id,NEW.submitted_at,json_object(
+        'id',NEW.id,'product_id',NEW.product_id,'evidence_type',NEW.evidence_type,'title',NEW.title,
+        'source_name',NEW.source_name,'source_region',NEW.source_region,'version',NEW.version,
+        'content_digest',NEW.content_digest,'summary_json',NEW.summary_json,'status',NEW.status,
+        'submitted_by',NEW.submitted_by,'submitted_at',NEW.submitted_at,'reviewed_by',NEW.reviewed_by,'reviewed_at',NEW.reviewed_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_evidence_upd AFTER UPDATE ON evidence_documents
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('evidence_documents',NEW.id,COALESCE(NEW.reviewed_at,NEW.submitted_at),json_object(
+        'id',NEW.id,'product_id',NEW.product_id,'evidence_type',NEW.evidence_type,'title',NEW.title,
+        'source_name',NEW.source_name,'source_region',NEW.source_region,'version',NEW.version,
+        'content_digest',NEW.content_digest,'summary_json',NEW.summary_json,'status',NEW.status,
+        'submitted_by',NEW.submitted_by,'submitted_at',NEW.submitted_at,'reviewed_by',NEW.reviewed_by,'reviewed_at',NEW.reviewed_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_protocols_ins AFTER INSERT ON pilot_protocols
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('pilot_protocols',NEW.id,NEW.created_at,json_object(
+        'id',NEW.id,'code',NEW.code,'name',NEW.name,'capability',NEW.capability,'product_id',NEW.product_id,'version',NEW.version,
+        'parameter_schema_json',NEW.parameter_schema_json,'default_parameters_json',NEW.default_parameters_json,
+        'max_runtime_seconds',NEW.max_runtime_seconds,'max_attempts',NEW.max_attempts,'active',NEW.active,
+        'created_by',NEW.created_by,'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_protocols_upd AFTER UPDATE ON pilot_protocols
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('pilot_protocols',NEW.id,NEW.updated_at,json_object(
+        'id',NEW.id,'code',NEW.code,'name',NEW.name,'capability',NEW.capability,'product_id',NEW.product_id,'version',NEW.version,
+        'parameter_schema_json',NEW.parameter_schema_json,'default_parameters_json',NEW.default_parameters_json,
+        'max_runtime_seconds',NEW.max_runtime_seconds,'max_attempts',NEW.max_attempts,'active',NEW.active,
+        'created_by',NEW.created_by,'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_sessions_ins AFTER INSERT ON pilot_sessions
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('pilot_sessions',NEW.id,NEW.created_at,json_object(
+        'id',NEW.id,'protocol_id',NEW.protocol_id,'project_code',NEW.project_code,'requested_by',NEW.requested_by,
+        'parameters_json',NEW.parameters_json,'parameter_digest',NEW.parameter_digest,'priority',NEW.priority,
+        'idempotency_key',NEW.idempotency_key,'status',NEW.status,'attempt_count',NEW.attempt_count,
+        'max_attempts',NEW.max_attempts,'available_at',NEW.available_at,'lease_owner',NEW.lease_owner,
+        'lease_expires_at',NEW.lease_expires_at,'current_observation_version',NEW.current_observation_version,
+        'last_error_code',NEW.last_error_code,'last_error_message',NEW.last_error_message,'version',NEW.version,
+        'started_at',NEW.started_at,'finished_at',NEW.finished_at,'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_snap_sessions_upd AFTER UPDATE ON pilot_sessions
+BEGIN
+    INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json)
+    VALUES('pilot_sessions',NEW.id,NEW.updated_at,json_object(
+        'id',NEW.id,'protocol_id',NEW.protocol_id,'project_code',NEW.project_code,'requested_by',NEW.requested_by,
+        'parameters_json',NEW.parameters_json,'parameter_digest',NEW.parameter_digest,'priority',NEW.priority,
+        'idempotency_key',NEW.idempotency_key,'status',NEW.status,'attempt_count',NEW.attempt_count,
+        'max_attempts',NEW.max_attempts,'available_at',NEW.available_at,'lease_owner',NEW.lease_owner,
+        'lease_expires_at',NEW.lease_expires_at,'current_observation_version',NEW.current_observation_version,
+        'last_error_code',NEW.last_error_code,'last_error_message',NEW.last_error_message,'version',NEW.version,
+        'started_at',NEW.started_at,'finished_at',NEW.finished_at,'created_at',NEW.created_at,'updated_at',NEW.updated_at));
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_cohort_version_issued_no_update
+BEFORE UPDATE ON cohort_versions
+WHEN OLD.status='issued'
+BEGIN
+    SELECT RAISE(ABORT,'issued cohort version is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_version_candidate_fixed_fields
+BEFORE UPDATE ON cohort_versions
+WHEN OLD.status='candidate' AND (
+    NEW.cutoff_at<>OLD.cutoff_at OR NEW.manifest_digest<>OLD.manifest_digest
+    OR NEW.version_no<>OLD.version_no OR NEW.cohort_id<>OLD.cohort_id
+    OR NEW.member_total<>OLD.member_total OR NEW.included_total<>OLD.included_total
+    OR NEW.excluded_total<>OLD.excluded_total
+)
+BEGIN
+    SELECT RAISE(ABORT,'cohort candidate core fields are fixed');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_version_issued_no_delete
+BEFORE DELETE ON cohort_versions
+WHEN OLD.status='issued'
+BEGIN
+    SELECT RAISE(ABORT,'issued cohort version is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_members_issued_no_update
+BEFORE UPDATE ON cohort_members
+BEGIN
+    SELECT RAISE(ABORT,'cohort members are write-once');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cohort_members_issued_no_delete
+BEFORE DELETE ON cohort_members
+WHEN EXISTS(SELECT 1 FROM cohort_versions v WHERE v.id=OLD.version_id AND v.status='issued')
+BEGIN
+    SELECT RAISE(ABORT,'issued cohort members are immutable');
+END;
 '''
 
 
@@ -282,6 +479,10 @@ PERMISSIONS = [
     ("feedback.read", "查看体验反馈", "feedback", "read"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("cohorts.read", "查看队列冻结", "cohorts", "read"),
+    ("cohorts.freeze", "创建与修订队列冻结", "cohorts", "freeze"),
+    ("cohorts.issue", "签发队列版本", "cohorts", "issue"),
+    ("cohorts.export", "导出队列制品", "cohorts", "export"),
 ]
 
 
@@ -334,7 +535,9 @@ def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
-        connection.execute("PRAGMA user_version=2")
+        connection.execute("PRAGMA user_version=3")
+        _ensure_column(connection, "pilot_protocols", "product_id", "INTEGER REFERENCES health_products(id)")
+        backfill_entity_snapshots(connection)
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",
@@ -360,3 +563,52 @@ def init_db() -> None:
 
 def migrate_db() -> None:
     init_db()
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def backfill_entity_snapshots(connection: sqlite3.Connection) -> None:
+    """为触发器启用前已经存在的实体补建首条快照，已有快照的实体跳过。"""
+    entities = [
+        ("health_products", "created_at", (
+            "id,code,name,organization,origin_country,category,intended_use,"
+            "risk_level,regulatory_status,active,created_at,updated_at"
+        )),
+        ("pilot_sites", "created_at", (
+            "id,code,name,site_type,region,capabilities_json,max_concurrent,status,created_at,updated_at"
+        )),
+        ("evidence_documents", "submitted_at", (
+            "id,product_id,evidence_type,title,source_name,source_region,version,content_digest,"
+            "summary_json,status,submitted_by,submitted_at,reviewed_by,reviewed_at"
+        )),
+        ("pilot_protocols", "created_at", (
+            "id,code,name,capability,product_id,version,parameter_schema_json,default_parameters_json,"
+            "max_runtime_seconds,max_attempts,active,created_by,created_at,updated_at"
+        )),
+        ("pilot_sessions", "created_at", (
+            "id,protocol_id,project_code,requested_by,parameters_json,parameter_digest,priority,"
+            "idempotency_key,status,attempt_count,max_attempts,available_at,lease_owner,lease_expires_at,"
+            "current_observation_version,last_error_code,last_error_message,version,started_at,finished_at,"
+            "created_at,updated_at"
+        )),
+    ]
+    for table, timestamp_column, columns in entities:
+        existing = {
+            int(row[0])
+            for row in connection.execute(
+                "SELECT DISTINCT entity_id FROM cohort_entity_snapshots WHERE entity_table=?", (table,)
+            ).fetchall()
+        }
+        rows = connection.execute(f"SELECT {columns} FROM {table} ORDER BY id").fetchall()
+        for row in rows:
+            if int(row["id"]) in existing:
+                continue
+            state = {key: row[key] for key in row.keys()}
+            connection.execute(
+                "INSERT INTO cohort_entity_snapshots(entity_table,entity_id,changed_at,state_json) VALUES(?,?,?,?)",
+                (table, int(row["id"]), row[timestamp_column], json.dumps(state, ensure_ascii=False, sort_keys=True)),
+            )
